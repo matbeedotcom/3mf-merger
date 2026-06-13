@@ -26,6 +26,7 @@ fn merges_luigi_and_yoshi_fixture_package() {
         false,
         false,
         false,
+        false,
     )
     .unwrap();
 
@@ -182,6 +183,7 @@ fn fixture_input_entries_are_accounted_for_in_output() {
         false,
         false,
         false,
+        false,
     )
     .unwrap();
 
@@ -228,11 +230,13 @@ fn yoshi_first_merges_keep_bambu_metadata_consistent() {
         false,
         false,
         false,
+        false,
     )
     .unwrap();
     three_mf_merger::merge_files(
         &[yoshi.clone(), yoshi],
         &yoshi_yoshi,
+        false,
         false,
         false,
         false,
@@ -257,6 +261,59 @@ fn yoshi_first_merges_keep_bambu_metadata_consistent() {
         identify_ids.len(),
         identify_ids.iter().collect::<BTreeSet<_>>().len()
     );
+}
+
+#[test]
+fn merges_three_fixture_packages_with_complete_preset_arrays() {
+    let mario = PathBuf::from("Mario.3mf");
+    let pikachu = PathBuf::from("Pikachu.3mf");
+    let star = PathBuf::from("Star.3mf");
+    if !mario.exists() || !pikachu.exists() || !star.exists() {
+        return;
+    }
+
+    let tempdir = tempdir().unwrap();
+    let output = tempdir.path().join("merged.3mf");
+    three_mf_merger::merge_files(
+        &[mario, pikachu, star],
+        &output,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+    )
+    .unwrap();
+
+    let project_settings: serde_json::Value =
+        serde_json::from_str(&read_zip_text(&output, "Metadata/project_settings.config")).unwrap();
+    let filament_count = project_settings["filament_colour"]
+        .as_array()
+        .unwrap()
+        .len();
+    assert_eq!(filament_count, 17);
+    assert_eq!(
+        project_settings["inherits_group"].as_array().unwrap().len(),
+        filament_count + 2
+    );
+    assert_eq!(
+        project_settings["different_settings_to_system"]
+            .as_array()
+            .unwrap()
+            .len(),
+        filament_count + 2
+    );
+
+    let model_settings = read_zip_text(&output, "Metadata/model_settings.config");
+    for id in 1..=17 {
+        assert!(
+            model_settings.contains(&format!("key=\"plater_id\" value=\"{}\"", id)),
+            "missing plater_id {id}"
+        );
+    }
 }
 
 fn archive_names(path: &PathBuf) -> BTreeSet<String> {

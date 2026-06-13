@@ -44,6 +44,9 @@ enum Commands {
         #[arg(long, help = "Merge printer settings from all inputs")]
         merge_printer: bool,
 
+        #[arg(long, help = "Reuse existing merged filaments when profiles match")]
+        dedupe_filaments: bool,
+
         #[arg(required = true)]
         inputs: Vec<PathBuf>,
     },
@@ -62,6 +65,7 @@ fn main() -> Result<()> {
             keep_first_filament,
             merge_filament,
             merge_printer,
+            dedupe_filaments,
             inputs,
         } => {
             three_mf_merger::merge_files(
@@ -74,6 +78,7 @@ fn main() -> Result<()> {
                 keep_first_filament,
                 merge_filament,
                 merge_printer,
+                dedupe_filaments,
             )?;
             println!("merged {} files into {}", inputs.len(), output.display());
         }

@@ -39,6 +39,7 @@ pub fn merge_files(
     _keep_first_filament: bool,
     merge_filament: bool,
     merge_printer: bool,
+    dedupe_filaments: bool,
 ) -> Result<()> {
     if inputs.len() < 2 {
         return Err(MergeError::TooFewInputs.into());
@@ -53,6 +54,7 @@ pub fn merge_files(
         color_presets,
         merge_filament,
         merge_printer,
+        dedupe_filaments,
     )?;
     let output_dir = output.parent().unwrap_or_else(|| Path::new("."));
     let temp = NamedTempFile::new_in(output_dir).with_context(|| {
@@ -81,6 +83,7 @@ fn merge_packages(
     color_presets: bool,
     merge_filament: bool,
     merge_printer: bool,
+    dedupe_filaments: bool,
 ) -> Result<BTreeMap<String, Vec<u8>>> {
     let mut loaded = Vec::with_capacity(inputs.len());
     for input in inputs {
@@ -334,6 +337,10 @@ fn merge_packages(
         )
         .into_bytes(),
     );
+
+    if dedupe_filaments {
+        dedupe_merged_filaments(&mut output_entries)?;
+    }
 
     // Debug output flags
     if printer_preset {
@@ -1221,6 +1228,20 @@ fn merge_project_settings(
             })
             .collect();
 
+        for key in ["inherits_group", "different_settings_to_system"] {
+            if !n_obj.contains_key(key) {
+                if let Some(values) = m_obj.get_mut(key).and_then(|x| x.as_array_mut()) {
+                    if values.len() == n1 + 2 {
+                        let insert_at = values.len() - 1;
+                        values.splice(
+                            insert_at..insert_at,
+                            vec![serde_json::Value::String(String::new()); n2],
+                        );
+                    }
+                }
+            }
+        }
+
         for (k, sc_type) in keys_to_pad {
             if let Some(a1) = m_obj.get(&k).and_then(|x| x.as_array()) {
                 match sc_type {
@@ -1278,6 +1299,395 @@ fn get_filament_count(val: &serde_json::Value) -> usize {
         .and_then(|v| v.as_array())
         .map(|a| a.len())
         .unwrap_or(0)
+}
+
+fn dedupe_merged_filaments(entries: &mut BTreeMap<String, Vec<u8>>) -> Result<()> {
+    let Some(project_bytes) = entries.get("Metadata/project_settings.config").cloned() else {
+        return Ok(());
+    };
+    let mut project: serde_json::Value = serde_json::from_slice(&project_bytes)?;
+    let old_count = get_filament_count(&project);
+    if old_count <= 1 {
+        return Ok(());
+    }
+
+    let profiles = filament_dedupe_profiles(&project, old_count)?;
+    let mut seen = BTreeMap::new();
+    let mut representatives = Vec::new();
+    let mut old_to_new = vec![0; old_count + 1];
+
+    for old_index in 1..=old_count {
+        let profile = &profiles[old_index - 1];
+        if let Some(&new_index) = seen.get(profile) {
+            old_to_new[old_index] = new_index;
+        } else {
+            let new_index = representatives.len() + 1;
+            seen.insert(profile.clone(), new_index);
+            representatives.push(old_index);
+            old_to_new[old_index] = new_index;
+        }
+    }
+
+    if representatives.len() == old_count {
+        return Ok(());
+    }
+
+    dedupe_project_settings_arrays(&mut project, old_count, &representatives);
+    entries.insert(
+        "Metadata/project_settings.config".to_string(),
+        serde_json::to_vec_pretty(&project)?,
+    );
+    rewrite_deduped_filament_references(entries, old_count, &old_to_new)?;
+
+    Ok(())
+}
+
+fn filament_dedupe_profiles(
+    project: &serde_json::Value,
+    filament_count: usize,
+) -> Result<Vec<String>> {
+    const PROFILE_KEYS: &[&str] = &[
+        "filament_colour",
+        "filament_type",
+        "filament_vendor",
+        "filament_density",
+        "filament_diameter",
+        "filament_flow_ratio",
+        "filament_shrink",
+        "filament_max_volumetric_speed",
+        "filament_retraction_length",
+        "filament_retraction_speed",
+        "filament_deretraction_speed",
+        "filament_z_hop",
+        "filament_wipe",
+        "filament_wipe_distance",
+        "nozzle_temperature",
+        "nozzle_temperature_initial_layer",
+        "cool_plate_temp",
+        "cool_plate_temp_initial_layer",
+        "eng_plate_temp",
+        "eng_plate_temp_initial_layer",
+        "hot_plate_temp",
+        "hot_plate_temp_initial_layer",
+        "supertack_plate_temp",
+        "supertack_plate_temp_initial_layer",
+        "textured_plate_temp",
+        "textured_plate_temp_initial_layer",
+        "temperature_vitrification",
+        "fan_min_speed",
+        "fan_max_speed",
+        "slow_down_for_layer_cooling",
+        "slow_down_layer_time",
+        "slow_down_min_speed",
+    ];
+
+    let mut profiles = Vec::with_capacity(filament_count);
+    for old_index in 1..=filament_count {
+        let mut profile = Vec::new();
+        for key in PROFILE_KEYS {
+            if let Some(value) = project.get(*key) {
+                profile.push((
+                    *key,
+                    filament_profile_value(value, old_index, filament_count),
+                ));
+            }
+        }
+        profiles.push(serde_json::to_string(&profile)?);
+    }
+    Ok(profiles)
+}
+
+fn filament_profile_value(
+    value: &serde_json::Value,
+    old_index: usize,
+    filament_count: usize,
+) -> serde_json::Value {
+    let Some(values) = value.as_array() else {
+        return value.clone();
+    };
+    if values.len() == filament_count {
+        return values[old_index - 1].clone();
+    }
+    if filament_count > 0 && values.len() % filament_count == 0 {
+        let factor = values.len() / filament_count;
+        let start = (old_index - 1) * factor;
+        let end = start + factor;
+        return serde_json::Value::Array(values[start..end].to_vec());
+    }
+    value.clone()
+}
+
+fn dedupe_project_settings_arrays(
+    project: &mut serde_json::Value,
+    old_count: usize,
+    representatives: &[usize],
+) {
+    let Some(settings) = project.as_object_mut() else {
+        return;
+    };
+
+    for (key, value) in settings.iter_mut() {
+        let Some(values) = value.as_array() else {
+            continue;
+        };
+        if values.is_empty() || old_count == 0 {
+            continue;
+        }
+
+        let is_filament_scaled_key = key.starts_with("filament_")
+            || is_static_filament_setting_key(key)
+            || key == "inherits_group"
+            || key == "different_settings_to_system";
+        if !is_filament_scaled_key {
+            continue;
+        }
+
+        let compacted = if key == "flush_volumes_matrix" && values.len() == old_count * old_count {
+            let new_count = representatives.len();
+            let mut out = Vec::with_capacity(new_count * new_count);
+            for &old_row in representatives {
+                for &old_col in representatives {
+                    out.push(values[(old_row - 1) * old_count + (old_col - 1)].clone());
+                }
+            }
+            Some(out)
+        } else if (key == "inherits_group" || key == "different_settings_to_system")
+            && values.len() == old_count + 2
+        {
+            let mut out = Vec::with_capacity(representatives.len() + 2);
+            out.push(values[0].clone());
+            out.extend(representatives.iter().map(|old| values[*old].clone()));
+            out.push(values[old_count + 1].clone());
+            Some(out)
+        } else if values.len() == old_count {
+            Some(
+                representatives
+                    .iter()
+                    .map(|old| values[*old - 1].clone())
+                    .collect(),
+            )
+        } else if values.len() % old_count == 0 {
+            let factor = values.len() / old_count;
+            let mut out = Vec::with_capacity(representatives.len() * factor);
+            for &old in representatives {
+                let start = (old - 1) * factor;
+                out.extend(values[start..start + factor].iter().cloned());
+            }
+            Some(out)
+        } else {
+            None
+        };
+
+        if let Some(compacted) = compacted {
+            *value = serde_json::Value::Array(compacted);
+        }
+    }
+}
+
+fn rewrite_deduped_filament_references(
+    entries: &mut BTreeMap<String, Vec<u8>>,
+    old_count: usize,
+    old_to_new: &[usize],
+) -> Result<()> {
+    let paths: Vec<_> = entries.keys().cloned().collect();
+    for path in paths {
+        if path == MODEL || is_object_model(&path) {
+            let Some(bytes) = entries.get(&path).cloned() else {
+                continue;
+            };
+            let xml = String::from_utf8(bytes).with_context(|| format!("{path} is not UTF-8"))?;
+            let rewritten = remap_filament_xml_attr(&xml, "face_property", old_to_new)?;
+            entries.insert(path, rewritten.into_bytes());
+        } else if path == MODEL_SETTINGS {
+            let Some(bytes) = entries.get(&path).cloned() else {
+                continue;
+            };
+            let xml = String::from_utf8(bytes).context("model_settings.config is not UTF-8")?;
+            let rewritten = rewrite_deduped_model_settings(&xml, old_count, old_to_new)?;
+            entries.insert(path, rewritten.into_bytes());
+        } else if path == "Metadata/filament_sequence.json" {
+            let Some(bytes) = entries.get(&path).cloned() else {
+                continue;
+            };
+            let mut sequence: serde_json::Value = serde_json::from_slice(&bytes)?;
+            remap_filament_sequence_value(&mut sequence, old_to_new);
+            entries.insert(path, serde_json::to_vec(&sequence)?);
+        } else if is_plate_json(&path) {
+            let Some(bytes) = entries.get(&path).cloned() else {
+                continue;
+            };
+            let mut plate_json: serde_json::Value = serde_json::from_slice(&bytes)?;
+            remap_plate_json_filament_indices(&mut plate_json, old_to_new);
+            entries.insert(path, serde_json::to_vec_pretty(&plate_json)?);
+        }
+    }
+    Ok(())
+}
+
+fn remap_filament_xml_attr(xml: &str, attr: &str, old_to_new: &[usize]) -> Result<String> {
+    let re = regex::Regex::new(&format!(r#"(\b{}=")(\d+)(")"#, regex::escape(attr)))?;
+    Ok(re
+        .replace_all(xml, |captures: &regex::Captures<'_>| {
+            let old: usize = captures[2].parse().unwrap_or(0);
+            if let Some(new) = remap_filament_index(old, old_to_new) {
+                format!("{}{}{}", &captures[1], new, &captures[3])
+            } else {
+                captures[0].to_string()
+            }
+        })
+        .into_owned())
+}
+
+fn rewrite_deduped_model_settings(
+    xml: &str,
+    old_count: usize,
+    old_to_new: &[usize],
+) -> Result<String> {
+    let extruder_re =
+        regex::Regex::new(r#"(<metadata\b[^>]*\bkey="extruder"[^>]*\bvalue=")(\d+)(")"#)?;
+    let mut rewritten = extruder_re
+        .replace_all(xml, |captures: &regex::Captures<'_>| {
+            let old: usize = captures[2].parse().unwrap_or(0);
+            if let Some(new) = remap_filament_index(old, old_to_new) {
+                format!("{}{}{}", &captures[1], new, &captures[3])
+            } else {
+                captures[0].to_string()
+            }
+        })
+        .into_owned();
+
+    let maps_re =
+        regex::Regex::new(r#"(<metadata\b[^>]*\bkey="filament_maps"[^>]*\bvalue=")([^"]*)(")"#)?;
+    rewritten = maps_re
+        .replace_all(&rewritten, |captures: &regex::Captures<'_>| {
+            let value = compact_filament_map_value(&captures[2], old_count, old_to_new, false)
+                .unwrap_or_else(|| captures[2].to_string());
+            format!("{}{}{}", &captures[1], value, &captures[3])
+        })
+        .into_owned();
+
+    let volumes_re = regex::Regex::new(
+        r#"(<metadata\b[^>]*\bkey="filament_volume_maps"[^>]*\bvalue=")([^"]*)(")"#,
+    )?;
+    rewritten = volumes_re
+        .replace_all(&rewritten, |captures: &regex::Captures<'_>| {
+            let value = compact_filament_map_value(&captures[2], old_count, old_to_new, true)
+                .unwrap_or_else(|| captures[2].to_string());
+            format!("{}{}{}", &captures[1], value, &captures[3])
+        })
+        .into_owned();
+
+    Ok(rewritten)
+}
+
+fn remap_filament_index(old: usize, old_to_new: &[usize]) -> Option<usize> {
+    if old == 0 {
+        Some(0)
+    } else {
+        old_to_new.get(old).copied().filter(|new| *new > 0)
+    }
+}
+
+fn compact_filament_map_value(
+    value: &str,
+    old_count: usize,
+    old_to_new: &[usize],
+    sum_values: bool,
+) -> Option<String> {
+    let parts: Vec<_> = value.split_whitespace().collect();
+    if parts.len() != old_count {
+        return None;
+    }
+    let new_count = old_to_new.iter().copied().max().unwrap_or(0);
+    if new_count == 0 {
+        return None;
+    }
+
+    if sum_values {
+        let mut numeric = vec![0.0; new_count];
+        for (old_zero, part) in parts.iter().enumerate() {
+            let parsed = part.parse::<f64>().ok()?;
+            let new_index = old_to_new[old_zero + 1];
+            numeric[new_index - 1] += parsed;
+        }
+        Some(
+            numeric
+                .into_iter()
+                .map(format_compact_number)
+                .collect::<Vec<_>>()
+                .join(" "),
+        )
+    } else {
+        let mut compacted = vec!["0".to_string(); new_count];
+        for (old_zero, part) in parts.iter().enumerate() {
+            let new_index = old_to_new[old_zero + 1];
+            let target = &mut compacted[new_index - 1];
+            if target == "0" && *part != "0" {
+                *target = (*part).to_string();
+            }
+        }
+        Some(compacted.join(" "))
+    }
+}
+
+fn format_compact_number(value: f64) -> String {
+    let formatted = format!("{value:.9}");
+    let trimmed = formatted.trim_end_matches('0').trim_end_matches('.');
+    if trimmed.is_empty() {
+        "0".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn remap_filament_sequence_value(value: &mut serde_json::Value, old_to_new: &[usize]) {
+    match value {
+        serde_json::Value::Array(values) => {
+            for item in values {
+                remap_filament_sequence_value(item, old_to_new);
+            }
+        }
+        serde_json::Value::Object(values) => {
+            for item in values.values_mut() {
+                remap_filament_sequence_value(item, old_to_new);
+            }
+        }
+        serde_json::Value::Number(number) => {
+            if let Some(old) = number.as_u64().map(|v| v as usize) {
+                if let Some(new) = remap_filament_index(old, old_to_new) {
+                    *value = serde_json::Value::Number(new.into());
+                }
+            }
+        }
+        serde_json::Value::String(text) => {
+            if let Ok(old) = text.parse::<usize>() {
+                if let Some(new) = remap_filament_index(old, old_to_new) {
+                    *text = new.to_string();
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn remap_plate_json_filament_indices(value: &mut serde_json::Value, old_to_new: &[usize]) {
+    match value {
+        serde_json::Value::Array(values) => {
+            for item in values {
+                remap_plate_json_filament_indices(item, old_to_new);
+            }
+        }
+        serde_json::Value::Object(values) => {
+            for (key, item) in values {
+                if key == "first_extruder" {
+                    remap_filament_sequence_value(item, old_to_new);
+                } else {
+                    remap_plate_json_filament_indices(item, old_to_new);
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 fn merge_flush_matrices(
@@ -1368,9 +1778,6 @@ fn get_plate_shift(
     source_plate_count: usize,
     total_plate_count: usize,
 ) -> (f64, f64) {
-    if index == 0 {
-        return (0.0, 0.0);
-    }
     let p_before = plate_offsets[index];
     let p_target = p_before + source_plate;
 
@@ -1404,10 +1811,6 @@ fn rewrite_build_item_transforms(
     total_plate_count: usize,
     object_to_plate: &BTreeMap<u32, usize>,
 ) -> Result<String> {
-    if index == 0 {
-        return Ok(xml.to_string());
-    }
-
     let item_re =
         regex::Regex::new(r#"(<item\b[^>]*\bobjectid=")(\d+)("[^>]*\btransform=")([^"]+)(")"#)?;
     let rewritten = item_re
@@ -1478,6 +1881,7 @@ mod tests {
         let err = merge_files(
             &[],
             Path::new("out.3mf"),
+            false,
             false,
             false,
             false,
@@ -1567,6 +1971,94 @@ mod tests {
         assert_eq!(
             get_plate_shift(1, 2, &plate_offsets, 6, 13),
             (-300.0, -640.0)
+        );
+    }
+
+    #[test]
+    fn shifts_first_input_when_merged_layout_changes() {
+        let plate_offsets = vec![0, 6];
+
+        // Source plate 4 in a 6-plate input is col 0,row 1.
+        // Merged plate 4 in a 12-plate output is col 3,row 0.
+        assert_eq!(get_plate_shift(0, 4, &plate_offsets, 6, 12), (900.0, 320.0));
+    }
+
+    #[test]
+    fn dedupes_matching_filaments_and_rewrites_references() {
+        let mut entries = BTreeMap::new();
+        entries.insert(
+            "Metadata/project_settings.config".to_string(),
+            br##"{
+  "filament_colour": ["#112233", "#112233"],
+  "filament_type": ["PLA", "PLA"],
+  "filament_vendor": ["Generic", "Generic"],
+  "filament_flow_ratio": ["1", "1"],
+  "filament_settings_id": ["Custom first", "Custom second"],
+  "nozzle_temperature": ["220", "220"],
+  "inherits_group": ["process", "first", "second", "printer"],
+  "different_settings_to_system": ["process", "first", "second", "printer"],
+  "flush_volumes_matrix": ["0", "12", "34", "0"],
+  "printable_area": ["0x0", "256x0", "256x256", "0x256"]
+}"##
+            .to_vec(),
+        );
+        entries.insert(
+            MODEL.to_string(),
+            br#"<model><resources><object id="1"><mesh><triangles><triangle face_property="2"/></triangles></mesh></object></resources><build/></model>"#.to_vec(),
+        );
+        entries.insert(
+            "3D/Objects/object_1.model".to_string(),
+            br#"<model><resources><object id="1"><mesh><triangles><triangle face_property="2"/></triangles></mesh></object></resources><build/></model>"#.to_vec(),
+        );
+        entries.insert(
+            MODEL_SETTINGS.to_string(),
+            br#"<config>
+  <object id="1"><part id="1"><metadata key="extruder" value="2"/></part></object>
+  <plate>
+    <metadata key="filament_maps" value="0 1"/>
+    <metadata key="filament_volume_maps" value="2.5 3.5"/>
+  </plate>
+</config>"#
+                .to_vec(),
+        );
+        entries.insert(
+            "Metadata/plate_1.json".to_string(),
+            br#"{"first_extruder":2}"#.to_vec(),
+        );
+        entries.insert(
+            "Metadata/filament_sequence.json".to_string(),
+            br#"{"plate_1":{"sequence":[2],"nozzle_sequence":["2"]}}"#.to_vec(),
+        );
+
+        dedupe_merged_filaments(&mut entries).unwrap();
+
+        let project: serde_json::Value =
+            serde_json::from_slice(&entries["Metadata/project_settings.config"]).unwrap();
+        assert_eq!(get_filament_count(&project), 1);
+        assert_eq!(project["filament_settings_id"].as_array().unwrap().len(), 1);
+        assert_eq!(project["inherits_group"].as_array().unwrap().len(), 3);
+        assert_eq!(project["flush_volumes_matrix"].as_array().unwrap().len(), 1);
+        assert_eq!(project["printable_area"].as_array().unwrap().len(), 4);
+
+        let model = String::from_utf8(entries[MODEL].clone()).unwrap();
+        assert!(model.contains(r#"face_property="1""#));
+        let object = String::from_utf8(entries["3D/Objects/object_1.model"].clone()).unwrap();
+        assert!(object.contains(r#"face_property="1""#));
+
+        let model_settings = String::from_utf8(entries[MODEL_SETTINGS].clone()).unwrap();
+        assert!(model_settings.contains(r#"key="extruder" value="1""#));
+        assert!(model_settings.contains(r#"key="filament_maps" value="1""#));
+        assert!(model_settings.contains(r#"key="filament_volume_maps" value="6""#));
+
+        let plate_json: serde_json::Value =
+            serde_json::from_slice(&entries["Metadata/plate_1.json"]).unwrap();
+        assert_eq!(plate_json["first_extruder"].as_u64(), Some(1));
+        let sequence: serde_json::Value =
+            serde_json::from_slice(&entries["Metadata/filament_sequence.json"]).unwrap();
+        assert_eq!(sequence["plate_1"]["sequence"][0].as_u64(), Some(1));
+        assert_eq!(
+            sequence["plate_1"]["nozzle_sequence"][0].as_str(),
+            Some("1")
         );
     }
 }
