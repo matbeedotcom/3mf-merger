@@ -115,6 +115,7 @@ fn merge_fixture() -> PathBuf {
         false, // keep_first_filament
         false, // merge_filament
         false, // merge_printer
+        false, // dedupe_filaments
     )
     .unwrap();
     output

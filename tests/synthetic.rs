@@ -26,6 +26,7 @@ fn remaps_colliding_material_object_ids_and_object_paths() {
         false,
         false,
         false,
+        false,
     )
     .unwrap();
 
@@ -76,11 +77,13 @@ fn repeated_merge_is_byte_deterministic_for_same_inputs() {
         false,
         false,
         false,
+        false,
     )
     .unwrap();
     three_mf_merger::merge_files(
         &[first, second],
         &output_b,
+        false,
         false,
         false,
         false,
