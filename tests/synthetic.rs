@@ -16,7 +16,18 @@ fn remaps_colliding_material_object_ids_and_object_paths() {
     write_synthetic_3mf(&first, "#ff0000").unwrap();
     write_synthetic_3mf(&second, "#00ff00").unwrap();
 
-    three_mf_merger::merge_files(&[first, second], &output, false).unwrap();
+    three_mf_merger::merge_files(
+        &[first, second],
+        &output,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+    )
+    .unwrap();
 
     let file = File::open(&output).unwrap();
     let mut archive = ZipArchive::new(file).unwrap();
@@ -55,8 +66,30 @@ fn repeated_merge_is_byte_deterministic_for_same_inputs() {
     write_synthetic_3mf(&first, "#ff0000").unwrap();
     write_synthetic_3mf(&second, "#00ff00").unwrap();
 
-    three_mf_merger::merge_files(&[first.clone(), second.clone()], &output_a, false).unwrap();
-    three_mf_merger::merge_files(&[first, second], &output_b, false).unwrap();
+    three_mf_merger::merge_files(
+        &[first.clone(), second.clone()],
+        &output_a,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+    )
+    .unwrap();
+    three_mf_merger::merge_files(
+        &[first, second],
+        &output_b,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+    )
+    .unwrap();
 
     let bytes_a = std::fs::read(output_a).unwrap();
     let bytes_b = std::fs::read(output_b).unwrap();

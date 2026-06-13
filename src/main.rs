@@ -20,6 +20,30 @@ enum Commands {
         #[arg(long)]
         force: bool,
 
+        #[arg(long, help = "Print merged printer preset settings to terminal")]
+        printer_preset: bool,
+
+        #[arg(long, help = "Print merged filament colour presets to terminal")]
+        color_presets: bool,
+
+        #[arg(
+            long,
+            help = "Only keep first input's printer settings (default: true)"
+        )]
+        keep_first_printer: bool,
+
+        #[arg(
+            long,
+            help = "Only keep first input's filament settings (default: true)"
+        )]
+        keep_first_filament: bool,
+
+        #[arg(long, help = "Merge filament settings from all inputs")]
+        merge_filament: bool,
+
+        #[arg(long, help = "Merge printer settings from all inputs")]
+        merge_printer: bool,
+
         #[arg(required = true)]
         inputs: Vec<PathBuf>,
     },
@@ -32,9 +56,25 @@ fn main() -> Result<()> {
         Commands::Merge {
             output,
             force,
+            printer_preset,
+            color_presets,
+            keep_first_printer,
+            keep_first_filament,
+            merge_filament,
+            merge_printer,
             inputs,
         } => {
-            three_mf_merger::merge_files(&inputs, &output, force)?;
+            three_mf_merger::merge_files(
+                &inputs,
+                &output,
+                force,
+                printer_preset,
+                color_presets,
+                keep_first_printer,
+                keep_first_filament,
+                merge_filament,
+                merge_printer,
+            )?;
             println!("merged {} files into {}", inputs.len(), output.display());
         }
     }

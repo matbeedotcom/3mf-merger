@@ -108,7 +108,13 @@ fn merge_fixture() -> PathBuf {
     three_mf_merger::merge_files(
         &[PathBuf::from(LUIGI), PathBuf::from(YOSHI)],
         &output,
-        false,
+        false, // force
+        false, // printer_preset
+        false, // color_presets
+        false, // keep_first_printer
+        false, // keep_first_filament
+        false, // merge_filament
+        false, // merge_printer
     )
     .unwrap();
     output

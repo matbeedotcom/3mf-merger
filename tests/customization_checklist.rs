@@ -36,7 +36,13 @@ fn merge_fixture() -> PathBuf {
     three_mf_merger::merge_files(
         &[PathBuf::from(LUIGI), PathBuf::from(YOSHI)],
         &output,
-        false,
+        false, // force
+        false, // printer_preset
+        false, // color_presets
+        false, // keep_first_printer
+        false, // keep_first_filament
+        false, // merge_filament
+        false, // merge_printer
     )
     .unwrap();
     output
@@ -188,6 +194,7 @@ fn verify_filament_material_printer_and_slicing_files(
         "Metadata/layer_heights_profile.txt",
         "Metadata/cut_information.xml",
         "Metadata/model_settings.config",
+        "Metadata/filament_settings_11.config",
     ] {
         assert!(
             output.names.contains(direct),
@@ -196,10 +203,7 @@ fn verify_filament_material_printer_and_slicing_files(
     }
 
     for sidecar in [
-        "MergedInputs/input-002/Metadata/project_settings.config",
         "MergedInputs/input-002/Metadata/slice_info.config",
-        "MergedInputs/input-002/Metadata/filament_sequence.json",
-        "MergedInputs/input-002/Metadata/filament_settings_1.config",
         "MergedInputs/input-002/Metadata/layer_heights_profile.txt",
         "MergedInputs/input-002/Metadata/cut_information.xml",
     ] {
@@ -216,6 +220,14 @@ fn verify_filament_material_printer_and_slicing_files(
     assert!(project_settings.contains("speed"));
     assert!(project_settings.contains("accel"));
     assert!(project_settings.contains("support"));
+
+    let parsed_settings: serde_json::Value = serde_json::from_str(project_settings).unwrap();
+    let colours = parsed_settings
+        .get("filament_colour")
+        .unwrap()
+        .as_array()
+        .unwrap();
+    assert_eq!(colours.len(), 16);
 }
 
 fn verify_per_object_overrides(
@@ -288,6 +300,23 @@ fn verify_plates_and_layout(
     assert!(model.contains(
         r#"<metadata name="Input002.Thumbnail_Middle">/Metadata/plate_8.png</metadata>"#
     ));
+
+    let settings = output.text("Metadata/model_settings.config");
+    for id in 1..=13 {
+        assert!(
+            settings.contains(&format!("key=\"plater_id\" value=\"{}\"", id))
+                || settings.contains(&format!("key=\"plater_id\" value=\"{}\"", id))
+        );
+    }
+    assert!(settings.contains("<assemble>"));
+    assert!(settings.contains("</assemble>"));
+    assert!(settings.contains("<assemble_item"));
+
+    let sequence = output.text("Metadata/filament_sequence.json");
+    let parsed_seq: serde_json::Value = serde_json::from_str(sequence).unwrap();
+    for id in 1..=13 {
+        assert!(parsed_seq.get(&format!("plate_{}", id)).is_some());
+    }
 }
 
 fn verify_project_and_vendor_metadata(
@@ -649,6 +678,12 @@ fn accounted_later_input(
     ) {
         return true;
     }
+    if entry == "Metadata/project_settings.config" || entry == "Metadata/filament_sequence.json" {
+        return output_entries.contains(entry);
+    }
+    if let Some(promoted_fil) = promoted_filament_settings_path(entry, 10) {
+        return output_entries.contains(&promoted_fil);
+    }
     if let Some(file_name) = entry.strip_prefix("3D/Objects/") {
         return output_entries.contains(&format!("3D/Objects/input-{input_index:03}-{file_name}"));
     }
@@ -659,6 +694,22 @@ fn accounted_later_input(
         return output_entries.contains(&promoted);
     }
     output_entries.contains(&format!("MergedInputs/input-{input_index:03}/{entry}"))
+}
+
+fn promoted_filament_settings_path(entry: &str, filament_offset: usize) -> Option<String> {
+    let file_name = entry.strip_prefix("Metadata/")?;
+    if let Some(rest) = file_name.strip_prefix("filament_settings_") {
+        let digit_count = rest.chars().take_while(|ch| ch.is_ascii_digit()).count();
+        if digit_count > 0 {
+            let source_number: usize = rest[..digit_count].parse().ok()?;
+            return Some(format!(
+                "Metadata/filament_settings_{}{}",
+                filament_offset + source_number,
+                &rest[digit_count..]
+            ));
+        }
+    }
+    None
 }
 
 fn promoted_plate_path(entry: &str, plate_offset: usize) -> Option<String> {

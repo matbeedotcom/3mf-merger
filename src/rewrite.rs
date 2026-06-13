@@ -7,6 +7,7 @@ use regex::{Captures, Regex};
 pub struct Remap {
     pub ids: BTreeMap<u32, u32>,
     pub paths: BTreeMap<String, String>,
+    pub filament_offset: usize,
 }
 
 impl Remap {
@@ -59,6 +60,27 @@ pub fn rewrite_model_xml(xml: &str, remap: &Remap) -> Result<String> {
         })
         .into_owned();
 
+    let xml = if remap.filament_offset > 0 {
+        let face_property_re = Regex::new(r#"(\bface_property=")(\d+)(")"#)?;
+        face_property_re
+            .replace_all(&xml, |captures: &Captures<'_>| {
+                let val: usize = captures[2].parse().unwrap();
+                if val > 0 {
+                    format!(
+                        "{}{}{}",
+                        &captures[1],
+                        val + remap.filament_offset,
+                        &captures[3]
+                    )
+                } else {
+                    captures[0].to_string()
+                }
+            })
+            .into_owned()
+    } else {
+        xml
+    };
+
     Ok(xml)
 }
 
@@ -107,7 +129,7 @@ fn deterministic_production_uuid(input_number: usize, uuid_index: u32) -> String
 pub fn prefix_metadata_name(metadata: &str, prefix: &str) -> Result<String> {
     let re = Regex::new(r#"(<metadata\b[^>]*\bname=")([^"]+)(")"#)?;
     Ok(re
-        .replace(metadata, |captures: &Captures<'_>| {
+        .replace_all(metadata, |captures: &Captures<'_>| {
             format!(
                 "{}{}{}",
                 &captures[1],
@@ -134,7 +156,31 @@ pub fn rewrite_bambu_model_settings(xml: &str, remap: &Remap) -> Result<String> 
 
     let xml = replace_id_attrs_if_mapped(&object_id_re, xml, remap)?;
     let xml = replace_id_attrs_if_mapped(&part_id_re, &xml, remap)?;
-    replace_id_attrs_if_mapped(&source_object_re, &xml, remap)
+    let xml = replace_id_attrs_if_mapped(&source_object_re, &xml, remap)?;
+
+    let xml = if remap.filament_offset > 0 {
+        let extruder_re =
+            Regex::new(r#"(<metadata\b[^>]*\bkey="extruder"[^>]*\bvalue=")(\d+)(")"#)?;
+        extruder_re
+            .replace_all(&xml, |captures: &Captures<'_>| {
+                let val: usize = captures[2].parse().unwrap();
+                if val > 0 {
+                    format!(
+                        "{}{}{}",
+                        &captures[1],
+                        val + remap.filament_offset,
+                        &captures[3]
+                    )
+                } else {
+                    captures[0].to_string()
+                }
+            })
+            .into_owned()
+    } else {
+        xml
+    };
+
+    Ok(xml)
 }
 
 pub fn config_object_elements(xml: &str) -> Result<Vec<String>> {
@@ -317,6 +363,17 @@ mod tests {
     }
 
     #[test]
+    fn prefixes_every_metadata_name_in_a_fragment() {
+        let metadata = r#"<metadata name="CreationDate">2026-04-16</metadata>
+<metadata name="Description">Luigi</metadata>"#;
+        assert_eq!(
+            prefix_metadata_name(metadata, "Input002.").unwrap(),
+            r#"<metadata name="Input002.CreationDate">2026-04-16</metadata>
+<metadata name="Input002.Description">Luigi</metadata>"#
+        );
+    }
+
+    #[test]
     fn rewrites_production_uuids_with_valid_deterministic_values() {
         let mut next = 1;
         let xml = r#"<object p:UUID="00000002-b1ec-4553-aec9-835e5b724bb4"/><item p:UUID="00000004-b1ec-4553-aec9-835e5b724bb4"/>"#;
@@ -348,6 +405,27 @@ mod tests {
         assert!(rewritten.contains(r#"key="source_object_id" value="10""#));
         assert!(rewritten.contains(r#"key="source_volume_id" value="0""#));
         assert_eq!(config_object_elements(&rewritten).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn rewrites_bambu_plate_object_and_identify_ids() {
+        let mut remap = Remap::default();
+        remap.ids.insert(2, 20);
+
+        let xml = r#"<plate>
+    <metadata key="plater_id" value="1"/>
+    <metadata key="filament_maps" value="1"/>
+    <metadata key="filament_volume_maps" value="0"/>
+    <model_instance>
+      <metadata key="object_id" value="2"/>
+      <metadata key="identify_id" value="743"/>
+    </model_instance>
+  </plate>"#;
+        let rewritten = rewrite_bambu_plate_element(xml, &remap, 6, 2048, 6, 0).unwrap();
+
+        assert!(rewritten.contains(r#"key="plater_id" value="7""#));
+        assert!(rewritten.contains(r#"key="object_id" value="20""#));
+        assert!(rewritten.contains(r#"key="identify_id" value="2791""#));
     }
 }
 
@@ -393,4 +471,180 @@ pub struct ModelSections {
     pub build_open: String,
     pub build_inner: String,
     pub post_build: String,
+}
+
+pub fn config_plate_elements(xml: &str) -> Result<Vec<String>> {
+    let re = Regex::new(r#"(?s)<plate\b[^>]*>.*?</plate>"#)?;
+    Ok(re
+        .find_iter(xml)
+        .map(|matched| matched.as_str().to_string())
+        .collect())
+}
+
+pub fn config_assemble_item_elements(xml: &str) -> Result<Vec<String>> {
+    let re = Regex::new(r#"<assemble_item\b[^>]*/>"#)?;
+    Ok(re
+        .find_iter(xml)
+        .map(|matched| matched.as_str().to_string())
+        .collect())
+}
+
+pub fn rewrite_bambu_plate_element(
+    xml: &str,
+    remap: &Remap,
+    plate_offset: usize,
+    identify_id_offset: u32,
+    n_before: usize,
+    n_after: usize,
+) -> Result<String> {
+    // 1. Shift plater_id
+    let plater_id_re = Regex::new(r#"(<metadata\b[^>]*\bkey="plater_id"[^>]*\bvalue=")(\d+)(")"#)?;
+    let xml = plater_id_re
+        .replace(xml, |captures: &Captures<'_>| {
+            let val: usize = captures[2].parse().unwrap();
+            format!("{}{}{}", &captures[1], val + plate_offset, &captures[3])
+        })
+        .into_owned();
+
+    // 2. Rewrite thumbnail and other plate files
+    let file_keys = [
+        "thumbnail_file",
+        "thumbnail_no_light_file",
+        "top_file",
+        "pick_file",
+    ];
+    let mut rewritten = xml;
+    for key in file_keys {
+        let file_re = Regex::new(&format!(
+            r#"(<metadata\b[^>]*\bkey="{}"[^>]*\bvalue=")(Metadata/)(plate_|plate_no_light_|top_|pick_)(\d+)([^"]*)(")"#,
+            key
+        ))?;
+        rewritten = file_re
+            .replace_all(&rewritten, |captures: &Captures<'_>| {
+                let val: usize = captures[4].parse().unwrap();
+                format!(
+                    "{}{}{}{}{}{}",
+                    &captures[1],
+                    &captures[2],
+                    &captures[3],
+                    val + plate_offset,
+                    &captures[5],
+                    &captures[6]
+                )
+            })
+            .into_owned();
+    }
+
+    // 3. Rewrite filament_maps and filament_volume_maps
+    let is_later_input = plate_offset > 0;
+    let maps_re = Regex::new(r#"(<metadata\b[^>]*\bkey="filament_maps"[^>]*\bvalue=")([^"]*)(")"#)?;
+    rewritten = maps_re
+        .replace_all(&rewritten, |captures: &Captures<'_>| {
+            let val = &captures[2];
+            let parts: Vec<&str> = val.split_whitespace().collect();
+            let new_val = if is_later_input {
+                let shifted: Vec<String> = parts
+                    .iter()
+                    .map(|p| {
+                        if let Ok(v) = p.parse::<usize>() {
+                            if v > 0 {
+                                (v + remap.filament_offset).to_string()
+                            } else {
+                                v.to_string()
+                            }
+                        } else {
+                            p.to_string()
+                        }
+                    })
+                    .collect();
+                let mut new_parts = vec!["0".to_string(); n_before];
+                new_parts.extend(shifted);
+                new_parts.extend(vec!["0".to_string(); n_after]);
+                new_parts.join(" ")
+            } else {
+                let mut new_parts = parts.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+                new_parts.extend(vec!["0".to_string(); n_after]);
+                new_parts.join(" ")
+            };
+            format!("{}{}{}", &captures[1], new_val, &captures[3])
+        })
+        .into_owned();
+
+    let vol_maps_re =
+        Regex::new(r#"(<metadata\b[^>]*\bkey="filament_volume_maps"[^>]*\bvalue=")([^"]*)(")"#)?;
+    rewritten = vol_maps_re
+        .replace_all(&rewritten, |captures: &Captures<'_>| {
+            let val = &captures[2];
+            let parts: Vec<&str> = val.split_whitespace().collect();
+            let new_val = if is_later_input {
+                let mut new_parts = vec!["0".to_string(); n_before];
+                new_parts.extend(parts.iter().map(|s| s.to_string()));
+                new_parts.extend(vec!["0".to_string(); n_after]);
+                new_parts.join(" ")
+            } else {
+                let mut new_parts = parts.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+                new_parts.extend(vec!["0".to_string(); n_after]);
+                new_parts.join(" ")
+            };
+            format!("{}{}{}", &captures[1], new_val, &captures[3])
+        })
+        .into_owned();
+
+    if identify_id_offset > 0 {
+        let identify_id_re =
+            Regex::new(r#"(<metadata\b[^>]*\bkey="identify_id"[^>]*\bvalue=")(\d+)(")"#)?;
+        rewritten = identify_id_re
+            .replace_all(&rewritten, |captures: &Captures<'_>| {
+                let val: u32 = captures[2].parse().unwrap();
+                format!(
+                    "{}{}{}",
+                    &captures[1],
+                    val + identify_id_offset,
+                    &captures[3]
+                )
+            })
+            .into_owned();
+    }
+
+    // 4. Rewrite model_instance object_id
+    let object_id_re = Regex::new(r#"(<metadata\b[^>]*\bkey="object_id"[^>]*\bvalue=")(\d+)(")"#)?;
+    let mut out = String::with_capacity(rewritten.len());
+    let mut last = 0;
+    for captures in object_id_re.captures_iter(&rewritten) {
+        let full = captures.get(0).unwrap();
+        out.push_str(&rewritten[last..full.start()]);
+        let source_id: u32 = captures[2].parse()?;
+        out.push_str(&captures[1]);
+        if let Some(mapped) = remap.ids.get(&source_id) {
+            out.push_str(&mapped.to_string());
+        } else {
+            out.push_str(&source_id.to_string());
+        }
+        out.push_str(&captures[3]);
+        last = full.end();
+    }
+    out.push_str(&rewritten[last..]);
+
+    Ok(out)
+}
+
+pub fn rewrite_bambu_assemble_item_element(xml: &str, remap: &Remap) -> Result<String> {
+    let object_id_re = Regex::new(r#"(<assemble_item\b[^>]*\bobject_id=")(\d+)(")"#)?;
+    let mut out = String::with_capacity(xml.len());
+    let mut last = 0;
+    for captures in object_id_re.captures_iter(xml) {
+        let full = captures.get(0).unwrap();
+        out.push_str(&xml[last..full.start()]);
+        let source_id: u32 = captures[2].parse()?;
+        out.push_str(&captures[1]);
+        if let Some(mapped) = remap.ids.get(&source_id) {
+            out.push_str(&mapped.to_string());
+        } else {
+            out.push_str(&source_id.to_string());
+        }
+        out.push_str(&captures[3]);
+        last = full.end();
+    }
+    out.push_str(&xml[last..]);
+    Ok(out)
 }
