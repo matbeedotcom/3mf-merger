@@ -21,6 +21,13 @@ impl Package {
         read_archive(&mut archive, path)
     }
 
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        let cursor = std::io::Cursor::new(bytes);
+        let mut archive = ZipArchive::new(cursor)
+            .with_context(|| "failed to read ZIP package from bytes")?;
+        read_archive(&mut archive, Path::new("memory"))
+    }
+
     pub fn get_text(&self, name: &str) -> Result<String> {
         let bytes = self
             .entries
@@ -72,4 +79,26 @@ pub fn write_package(path: &Path, entries: &BTreeMap<String, Vec<u8>>) -> Result
         .finish()
         .context("failed to finish output ZIP package")?;
     Ok(())
+}
+
+pub fn write_package_to_bytes(entries: &BTreeMap<String, Vec<u8>>) -> Result<Vec<u8>> {
+    let mut buffer = Vec::new();
+    {
+        let mut writer = ZipWriter::new(std::io::Cursor::new(&mut buffer));
+        let options = SimpleFileOptions::default()
+            .compression_method(CompressionMethod::Deflated)
+            .unix_permissions(0o644);
+
+        for (name, bytes) in entries {
+            writer
+                .start_file(name, options)
+                .with_context(|| format!("failed to start ZIP entry {name}"))?;
+            writer
+                .write_all(bytes)
+                .with_context(|| format!("failed to write ZIP entry {name}"))?;
+        }
+
+        writer.finish().context("failed to finish output ZIP package")?;
+    }
+    Ok(buffer)
 }

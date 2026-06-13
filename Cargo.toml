@@ -9,11 +9,30 @@ clap = { version = "4.5", features = ["derive"] }
 lib3mf = { version = "0.1", default-features = false }
 regex = "1.10"
 serde_json = { version = "1.0", features = ["preserve_order"] }
-tempfile = "3.10"
+tempfile = { version = "3.10", default-features = false } # filesystem features not needed for WASM
 thiserror = "1.0"
 zip = { version = "2.2", default-features = false, features = ["deflate"] }
+wasm-bindgen = { version = "0.2", optional = true }
+js-sys = { version = "0.3", optional = true }
 
 [dev-dependencies]
 assert_cmd = "2.0"
 predicates = "3.1"
-tempfile = "3.10"
+tempfile = { version = "3.10", default-features = false }
+wasm-bindgen-test = "0.3"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+wasm = ["wasm-bindgen", "js-sys"]
+
+[target."cfg(target_arch = \"wasm32\")".dependencies]
+getrandom = { version = "0.2", features = ["js"] }
+console_error_panic_hook = "0.1"
+
+[[test]]
+name = "wasm_test"
+harness = false
+required-features = ["wasm"]

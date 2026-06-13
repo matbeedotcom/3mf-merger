@@ -6,7 +6,7 @@ use anyhow::{bail, Context, Result};
 use tempfile::NamedTempFile;
 use thiserror::Error;
 
-use crate::package::{write_package, Package};
+use crate::package::{write_package, write_package_to_bytes, Package};
 use crate::rewrite::{
     collect_metadata_elements, collect_resource_ids, config_assemble_item_elements,
     config_object_elements, config_plate_elements, parse_relationships, prefix_metadata_name,
@@ -29,6 +29,32 @@ pub enum MergeError {
     OutputExists(PathBuf),
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct MergeOptions {
+    pub force: bool,
+    pub printer_preset: bool,
+    pub color_presets: bool,
+    pub keep_first_printer: bool,
+    pub keep_first_filament: bool,
+    pub merge_filament: bool,
+    pub merge_printer: bool,
+    pub dedupe_filaments: bool,
+}
+
+pub fn merge_files_wasm(inputs: &[Vec<u8>], options: &MergeOptions) -> Result<Vec<u8>> {
+    if inputs.len() < 2 {
+        return Err(MergeError::TooFewInputs.into());
+    }
+
+    let loaded: Vec<Package> = inputs
+        .iter()
+        .map(|bytes| Package::from_bytes(bytes))
+        .collect::<Result<Vec<_>>>()?;
+
+    let entries = merge_packages_loaded(&loaded, options)?;
+    write_package_to_bytes(&entries)
+}
+
 pub fn merge_files(
     inputs: &[PathBuf],
     output: &Path,
@@ -48,14 +74,23 @@ pub fn merge_files(
         return Err(MergeError::OutputExists(output.to_path_buf()).into());
     }
 
-    let merged = merge_packages(
-        inputs,
+    let options = MergeOptions {
+        force,
         printer_preset,
         color_presets,
+        keep_first_printer: true,
+        keep_first_filament: true,
         merge_filament,
         merge_printer,
         dedupe_filaments,
-    )?;
+    };
+
+    let loaded: Vec<Package> = inputs
+        .iter()
+        .map(|p| Package::read(p.as_ref()))
+        .collect::<Result<Vec<_>>>()?;
+
+    let merged = merge_packages_loaded(&loaded, &options)?;
     let output_dir = output.parent().unwrap_or_else(|| Path::new("."));
     let temp = NamedTempFile::new_in(output_dir).with_context(|| {
         format!(
@@ -77,24 +112,21 @@ pub fn merge_files(
     Ok(())
 }
 
-fn merge_packages(
-    inputs: &[PathBuf],
-    printer_preset: bool,
-    color_presets: bool,
-    merge_filament: bool,
-    merge_printer: bool,
-    dedupe_filaments: bool,
+fn merge_packages_loaded(
+    loaded: &[Package],
+    options: &MergeOptions,
 ) -> Result<BTreeMap<String, Vec<u8>>> {
-    let mut loaded = Vec::with_capacity(inputs.len());
-    for input in inputs {
-        loaded.push(Package::read(input)?);
-    }
+    let printer_preset = options.printer_preset;
+    let color_presets = options.color_presets;
+    let merge_filament = options.merge_filament;
+    let merge_printer = options.merge_printer;
+    let dedupe_filaments = options.dedupe_filaments;
 
     let mut filament_counts = Vec::with_capacity(loaded.len());
     let mut cumulative_filaments = Vec::with_capacity(loaded.len());
     let mut total_filaments = 0;
 
-    for package in &loaded {
+    for package in loaded {
         let count =
             if let Some(settings_bytes) = package.entries.get("Metadata/project_settings.config") {
                 let json: serde_json::Value =
@@ -111,7 +143,7 @@ fn merge_packages(
     let mut plate_counts = Vec::with_capacity(loaded.len());
     let mut plate_offsets = Vec::with_capacity(loaded.len());
     let mut cumulative_plates = 0;
-    for package in &loaded {
+    for package in loaded {
         let plate_count = get_plate_count(package);
         plate_counts.push(plate_count);
         plate_offsets.push(cumulative_plates);
@@ -120,7 +152,7 @@ fn merge_packages(
 
     let mut identify_id_offsets = Vec::with_capacity(loaded.len());
     let mut cumulative_identify_id_offset = 0;
-    for package in &loaded {
+    for package in loaded {
         identify_id_offsets.push(cumulative_identify_id_offset);
         cumulative_identify_id_offset += get_max_identify_id(package);
     }
@@ -173,8 +205,8 @@ fn merge_packages(
             if index > 0 {
                 rewritten = rewrite_production_uuids(&rewritten, index + 1, &mut next_uuid_index)
                     .with_context(|| {
-                    format!("failed to rewrite production UUIDs for {source_path}")
-                })?;
+                        format!("failed to rewrite production UUIDs for {source_path}")
+                    })?;
             }
             output_entries.insert(mapped_path.clone(), rewritten.into_bytes());
             model_rel_targets.push(format!("/{mapped_path}"));
