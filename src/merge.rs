@@ -105,11 +105,14 @@ fn merge_packages(
         total_filaments += count;
     }
 
+    let mut plate_counts = Vec::with_capacity(loaded.len());
     let mut plate_offsets = Vec::with_capacity(loaded.len());
     let mut cumulative_plates = 0;
     for package in &loaded {
+        let plate_count = get_plate_count(package);
+        plate_counts.push(plate_count);
         plate_offsets.push(cumulative_plates);
-        cumulative_plates += get_plate_count(package);
+        cumulative_plates += plate_count;
     }
 
     let mut identify_id_offsets = Vec::with_capacity(loaded.len());
@@ -175,8 +178,14 @@ fn merge_packages(
         }
 
         let object_to_plate = get_object_plate_map(package)?;
-        let shifted_source_model =
-            rewrite_build_item_transforms(&source_model, index, &plate_offsets, &object_to_plate)?;
+        let shifted_source_model = rewrite_build_item_transforms(
+            &source_model,
+            index,
+            &plate_offsets,
+            plate_counts[index],
+            cumulative_plates,
+            &object_to_plate,
+        )?;
 
         let mut rewritten_model = rewrite_model_xml(&shifted_source_model, &remap)
             .with_context(|| format!("failed to rewrite top-level model for input #{index}"))?;
@@ -213,6 +222,8 @@ fn merge_packages(
             remap.filament_offset,
             &remap,
             &plate_offsets,
+            plate_counts[index],
+            cumulative_plates,
         )?;
         if index > 0 {
             for metadata in collect_metadata_elements(&rewritten_model)? {
@@ -440,6 +451,8 @@ fn copy_auxiliary_entries(
     filament_offset: usize,
     remap: &Remap,
     plate_offsets: &[usize],
+    source_plate_count: usize,
+    total_plate_count: usize,
 ) -> Result<BTreeMap<String, String>> {
     let mut copied_paths = BTreeMap::new();
     let plate_plan = plan_plate_promotions(index, package, *next_plate_index)?;
@@ -536,7 +549,13 @@ fn copy_auxiliary_entries(
         let mut target_bytes = bytes.clone();
         if is_plate_json(path) {
             let source_plate = metadata_plate_number(path).unwrap_or(1);
-            let (dx, dy) = get_plate_shift(index, source_plate, plate_offsets);
+            let (dx, dy) = get_plate_shift(
+                index,
+                source_plate,
+                plate_offsets,
+                source_plate_count,
+                total_plate_count,
+            );
             target_bytes = rewrite_plate_json(&target_bytes, remap, filament_offset, dx, dy)?;
         }
 
@@ -1342,29 +1361,47 @@ fn get_object_plate_map(package: &Package) -> Result<BTreeMap<u32, usize>> {
     Ok(map)
 }
 
-fn get_plate_shift(index: usize, source_plate: usize, plate_offsets: &[usize]) -> (f64, f64) {
+fn get_plate_shift(
+    index: usize,
+    source_plate: usize,
+    plate_offsets: &[usize],
+    source_plate_count: usize,
+    total_plate_count: usize,
+) -> (f64, f64) {
     if index == 0 {
         return (0.0, 0.0);
     }
     let p_before = plate_offsets[index];
     let p_target = p_before + source_plate;
 
-    let col_target = ((p_target - 1) % 3) as f64;
-    let row_target = ((p_target - 1) / 3) as f64;
+    let (col_target, row_target) = plate_position(p_target, total_plate_count);
+    let (col_source, row_source) = plate_position(source_plate, source_plate_count);
 
-    let col_source = ((source_plate - 1) % 3) as f64;
-    let row_source = ((source_plate - 1) / 3) as f64;
-
-    let dx = (col_target - col_source) * 300.0;
-    let dy = (row_target - row_source) * -320.0;
+    let dx = (col_target as f64 - col_source as f64) * 300.0;
+    let dy = (row_target as f64 - row_source as f64) * -320.0;
 
     (dx, dy)
+}
+
+fn plate_position(plate: usize, plate_count: usize) -> (usize, usize) {
+    let columns = plate_grid_columns(plate_count);
+    ((plate - 1) % columns, (plate - 1) / columns)
+}
+
+fn plate_grid_columns(plate_count: usize) -> usize {
+    match plate_count {
+        0 | 1 => 1,
+        2 => 2,
+        count => (count as f64).sqrt().ceil().max(3.0) as usize,
+    }
 }
 
 fn rewrite_build_item_transforms(
     xml: &str,
     index: usize,
     plate_offsets: &[usize],
+    source_plate_count: usize,
+    total_plate_count: usize,
     object_to_plate: &BTreeMap<u32, usize>,
 ) -> Result<String> {
     if index == 0 {
@@ -1377,7 +1414,13 @@ fn rewrite_build_item_transforms(
         .replace_all(xml, |captures: &regex::Captures<'_>| {
             let object_id: u32 = captures[2].parse().unwrap();
             if let Some(&plate_id) = object_to_plate.get(&object_id) {
-                let (dx, dy) = get_plate_shift(index, plate_id, plate_offsets);
+                let (dx, dy) = get_plate_shift(
+                    index,
+                    plate_id,
+                    plate_offsets,
+                    source_plate_count,
+                    total_plate_count,
+                );
                 if dx != 0.0 || dy != 0.0 {
                     let orig_transform = &captures[4];
                     if let Some(new_transform) = shift_transform_matrix(orig_transform, dx, dy) {
@@ -1495,5 +1538,35 @@ mod tests {
         assert_eq!(plan["Metadata/top_1.png"], "Metadata/top_8.png");
         assert_eq!(plan["Metadata/pick_1.png"], "Metadata/pick_8.png");
         assert_eq!(plan["Metadata/plate_2.json"], "Metadata/plate_9.json");
+    }
+
+    #[test]
+    fn uses_bambu_square_plate_layout_columns() {
+        assert_eq!(plate_grid_columns(1), 1);
+        assert_eq!(plate_grid_columns(2), 2);
+        for count in 3..=9 {
+            assert_eq!(plate_grid_columns(count), 3);
+        }
+        for count in 10..=16 {
+            assert_eq!(plate_grid_columns(count), 4);
+        }
+        for count in 17..=25 {
+            assert_eq!(plate_grid_columns(count), 5);
+        }
+        for count in 26..=36 {
+            assert_eq!(plate_grid_columns(count), 6);
+        }
+    }
+
+    #[test]
+    fn shifts_between_source_and_merged_bambu_plate_layouts() {
+        let plate_offsets = vec![0, 7];
+
+        // Source plate 2 in a 6-plate input is col 1,row 0.
+        // Merged plate 9 in a 13-plate output is col 0,row 2.
+        assert_eq!(
+            get_plate_shift(1, 2, &plate_offsets, 6, 13),
+            (-300.0, -640.0)
+        );
     }
 }
