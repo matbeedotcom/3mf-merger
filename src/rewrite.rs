@@ -424,6 +424,7 @@ mod tests {
         let rewritten = rewrite_bambu_plate_element(xml, &remap, 6, 2048, 6, 0).unwrap();
 
         assert!(rewritten.contains(r#"key="plater_id" value="7""#));
+        assert!(rewritten.contains(r#"key="filament_maps" value="0 0 0 0 0 0 1""#));
         assert!(rewritten.contains(r#"key="object_id" value="20""#));
         assert!(rewritten.contains(r#"key="identify_id" value="2791""#));
     }
@@ -543,22 +544,8 @@ pub fn rewrite_bambu_plate_element(
             let val = &captures[2];
             let parts: Vec<&str> = val.split_whitespace().collect();
             let new_val = if is_later_input {
-                let shifted: Vec<String> = parts
-                    .iter()
-                    .map(|p| {
-                        if let Ok(v) = p.parse::<usize>() {
-                            if v > 0 {
-                                (v + remap.filament_offset).to_string()
-                            } else {
-                                v.to_string()
-                            }
-                        } else {
-                            p.to_string()
-                        }
-                    })
-                    .collect();
                 let mut new_parts = vec!["0".to_string(); n_before];
-                new_parts.extend(shifted);
+                new_parts.extend(parts.iter().map(|s| s.to_string()));
                 new_parts.extend(vec!["0".to_string(); n_after]);
                 new_parts.join(" ")
             } else {
