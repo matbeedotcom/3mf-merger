@@ -62,38 +62,10 @@ pub fn rewrite_model_xml(xml: &str, remap: &Remap) -> Result<String> {
 
     let xml = if remap.filament_offset > 0 {
         let face_property_re = Regex::new(r#"(\bface_property=")(\d+)(")"#)?;
-        let xml = face_property_re
-            .replace_all(&xml, |captures: &Captures<'_>| {
-                let val: usize = captures[2].parse().unwrap();
-                if val > 0 {
-                    format!(
-                        "{}{}{}",
-                        &captures[1],
-                        val + remap.filament_offset,
-                        &captures[3]
-                    )
-                } else {
-                    captures[0].to_string()
-                }
-            })
-            .into_owned();
+        let xml = shift_positive_numeric_attr(&face_property_re, &xml, remap.filament_offset);
 
         let paint_supports_re = Regex::new(r#"(\bpaint_supports=")(\d+)(")"#)?;
-        paint_supports_re
-            .replace_all(&xml, |captures: &Captures<'_>| {
-                let val: usize = captures[2].parse().unwrap();
-                if val > 0 {
-                    format!(
-                        "{}{}{}",
-                        &captures[1],
-                        val + remap.filament_offset,
-                        &captures[3]
-                    )
-                } else {
-                    captures[0].to_string()
-                }
-            })
-            .into_owned()
+        shift_positive_numeric_attr(&paint_supports_re, &xml, remap.filament_offset)
     } else {
         xml
     };
@@ -178,21 +150,7 @@ pub fn rewrite_bambu_model_settings(xml: &str, remap: &Remap) -> Result<String> 
     let xml = if remap.filament_offset > 0 {
         let extruder_re =
             Regex::new(r#"(<metadata\b[^>]*\bkey="extruder"[^>]*\bvalue=")(\d+)(")"#)?;
-        extruder_re
-            .replace_all(&xml, |captures: &Captures<'_>| {
-                let val: usize = captures[2].parse().unwrap();
-                if val > 0 {
-                    format!(
-                        "{}{}{}",
-                        &captures[1],
-                        val + remap.filament_offset,
-                        &captures[3]
-                    )
-                } else {
-                    captures[0].to_string()
-                }
-            })
-            .into_owned()
+        shift_positive_numeric_attr(&extruder_re, &xml, remap.filament_offset)
     } else {
         xml
     };
@@ -244,6 +202,22 @@ fn capture_attr(re: &Regex, attrs: &str) -> Option<String> {
     re.captures(attrs)
         .and_then(|captures| captures.get(1).or_else(|| captures.get(2)))
         .map(|value| value.as_str().to_string())
+}
+
+fn shift_positive_numeric_attr(re: &Regex, xml: &str, offset: usize) -> String {
+    re.replace_all(xml, |captures: &Captures<'_>| {
+        let Some(val) = captures[2].parse::<usize>().ok() else {
+            return captures[0].to_string();
+        };
+        if val == 0 {
+            return captures[0].to_string();
+        }
+        let Some(shifted) = val.checked_add(offset) else {
+            return captures[0].to_string();
+        };
+        format!("{}{}{}", &captures[1], shifted, &captures[3])
+    })
+    .into_owned()
 }
 
 fn replace_id_attrs(re: &Regex, xml: &str, remap: &Remap) -> Result<String> {
@@ -422,6 +396,50 @@ mod tests {
         assert!(rewritten.contains(r#"key="source_object_id" value="10""#));
         assert!(rewritten.contains(r#"key="source_volume_id" value="0""#));
         assert_eq!(config_object_elements(&rewritten).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn keeps_oversized_vendor_numeric_attributes_unchanged() {
+        let mut remap = Remap::default();
+        remap.filament_offset = 2;
+
+        let xml = r#"<model>
+  <resources>
+    <object id="1">
+      <mesh>
+        <triangles>
+          <triangle face_property="999999999999999999999999" paint_supports="999999999999999999999999"/>
+        </triangles>
+      </mesh>
+    </object>
+  </resources>
+  <build/>
+</model>"#;
+        remap.ids.insert(1, 1);
+
+        let rewritten = rewrite_model_xml(xml, &remap).unwrap();
+
+        assert!(rewritten.contains(r#"face_property="999999999999999999999999""#));
+        assert!(rewritten.contains(r#"paint_supports="999999999999999999999999""#));
+    }
+
+    #[test]
+    fn keeps_oversized_extruder_metadata_unchanged() {
+        let mut remap = Remap::default();
+        remap.filament_offset = 2;
+
+        let xml = r#"<config>
+  <object id="1">
+    <part id="1">
+      <metadata key="extruder" value="999999999999999999999999"/>
+    </part>
+  </object>
+</config>"#;
+        remap.ids.insert(1, 1);
+
+        let rewritten = rewrite_bambu_model_settings(xml, &remap).unwrap();
+
+        assert!(rewritten.contains(r#"key="extruder" value="999999999999999999999999""#));
     }
 
     #[test]
