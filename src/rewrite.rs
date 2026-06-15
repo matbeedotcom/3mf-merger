@@ -62,7 +62,24 @@ pub fn rewrite_model_xml(xml: &str, remap: &Remap) -> Result<String> {
 
     let xml = if remap.filament_offset > 0 {
         let face_property_re = Regex::new(r#"(\bface_property=")(\d+)(")"#)?;
-        face_property_re
+        let xml = face_property_re
+            .replace_all(&xml, |captures: &Captures<'_>| {
+                let val: usize = captures[2].parse().unwrap();
+                if val > 0 {
+                    format!(
+                        "{}{}{}",
+                        &captures[1],
+                        val + remap.filament_offset,
+                        &captures[3]
+                    )
+                } else {
+                    captures[0].to_string()
+                }
+            })
+            .into_owned();
+
+        let paint_supports_re = Regex::new(r#"(\bpaint_supports=")(\d+)(")"#)?;
+        paint_supports_re
             .replace_all(&xml, |captures: &Captures<'_>| {
                 let val: usize = captures[2].parse().unwrap();
                 if val > 0 {
