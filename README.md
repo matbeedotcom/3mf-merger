@@ -4,6 +4,16 @@
 
 Repository: <https://github.com/matbeedotcom/3mf-merger/>
 
+## Browser Demo
+
+The WASM demo can be hosted on GitHub Pages. After Pages is enabled for GitHub
+Actions deployments, pushes to `main` publish:
+
+<https://matbeedotcom.github.io/3mf-merger/>
+
+The root page redirects to `demo.html`, which loads the browser WASM package
+from `pkg/`.
+
 ## Install
 
 ```bash
