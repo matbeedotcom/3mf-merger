@@ -20,14 +20,21 @@ const ROOT_RELS: &str = "_rels/.rels";
 const MODEL: &str = "3D/3dmodel.model";
 const MODEL_RELS: &str = "3D/_rels/3dmodel.model.rels";
 const MODEL_SETTINGS: &str = "Metadata/model_settings.config";
-const DEFAULT_PLATE_SPACING: PlateSpacing = PlateSpacing { x: 300.0, y: 320.0 };
+const DEFAULT_PLATE_LAYOUT: PlateLayout = PlateLayout {
+    bed_x: 256.0,
+    bed_y: 256.0,
+    gap_x: PLATE_GUTTER_X,
+    gap_y: PLATE_GUTTER_Y,
+};
 const PLATE_GUTTER_X: f64 = 44.0;
 const PLATE_GUTTER_Y: f64 = 64.0;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-struct PlateSpacing {
-    x: f64,
-    y: f64,
+struct PlateLayout {
+    bed_x: f64,
+    bed_y: f64,
+    gap_x: f64,
+    gap_y: f64,
 }
 
 #[derive(Debug, Error)]
@@ -158,7 +165,7 @@ fn merge_packages_loaded(
         plate_offsets.push(cumulative_plates);
         cumulative_plates += plate_count;
     }
-    let plate_spacing = plate_spacing_from_packages(loaded);
+    let plate_layout = plate_layout_from_packages(loaded);
 
     let mut identify_id_offsets = Vec::with_capacity(loaded.len());
     let mut cumulative_identify_id_offset = 0;
@@ -229,7 +236,7 @@ fn merge_packages_loaded(
             plate_counts[index],
             cumulative_plates,
             &object_to_plate,
-            plate_spacing,
+            plate_layout,
         )?;
 
         let mut rewritten_model = rewrite_model_xml(&shifted_source_model, &remap)
@@ -269,7 +276,7 @@ fn merge_packages_loaded(
             &plate_offsets,
             plate_counts[index],
             cumulative_plates,
-            plate_spacing,
+            plate_layout,
         )?;
         if index > 0 {
             for metadata in collect_metadata_elements(&rewritten_model)? {
@@ -503,7 +510,7 @@ fn copy_auxiliary_entries(
     plate_offsets: &[usize],
     source_plate_count: usize,
     total_plate_count: usize,
-    plate_spacing: PlateSpacing,
+    plate_layout: PlateLayout,
 ) -> Result<BTreeMap<String, String>> {
     let mut copied_paths = BTreeMap::new();
     let plate_plan = plan_plate_promotions(index, package, *next_plate_index)?;
@@ -606,7 +613,7 @@ fn copy_auxiliary_entries(
                 plate_offsets,
                 source_plate_count,
                 total_plate_count,
-                plate_spacing,
+                plate_layout,
             );
             target_bytes = rewrite_plate_json(&target_bytes, remap, filament_offset, dx, dy)?;
         }
@@ -1889,16 +1896,16 @@ fn get_object_plate_map(package: &Package) -> Result<BTreeMap<u32, usize>> {
     Ok(map)
 }
 
-fn plate_spacing_from_packages(packages: &[Package]) -> PlateSpacing {
+fn plate_layout_from_packages(packages: &[Package]) -> PlateLayout {
     packages
         .first()
         .and_then(|package| package.entries.get("Metadata/project_settings.config"))
         .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(bytes).ok())
-        .and_then(|settings| plate_spacing_from_project_settings(&settings))
-        .unwrap_or(DEFAULT_PLATE_SPACING)
+        .and_then(|settings| plate_layout_from_project_settings(&settings))
+        .unwrap_or(DEFAULT_PLATE_LAYOUT)
 }
 
-fn plate_spacing_from_project_settings(settings: &serde_json::Value) -> Option<PlateSpacing> {
+fn plate_layout_from_project_settings(settings: &serde_json::Value) -> Option<PlateLayout> {
     let points = settings.get("printable_area")?.as_array()?;
     let mut coords = points
         .iter()
@@ -1921,9 +1928,11 @@ fn plate_spacing_from_project_settings(settings: &serde_json::Value) -> Option<P
     let width = max_x - min_x;
     let height = max_y - min_y;
     if width.is_finite() && height.is_finite() && width > 0.0 && height > 0.0 {
-        Some(PlateSpacing {
-            x: width + PLATE_GUTTER_X,
-            y: height + PLATE_GUTTER_Y,
+        Some(PlateLayout {
+            bed_x: width,
+            bed_y: height,
+            gap_x: PLATE_GUTTER_X,
+            gap_y: PLATE_GUTTER_Y,
         })
     } else {
         None
@@ -1941,7 +1950,7 @@ fn get_plate_shift(
     plate_offsets: &[usize],
     source_plate_count: usize,
     total_plate_count: usize,
-    plate_spacing: PlateSpacing,
+    plate_layout: PlateLayout,
 ) -> (f64, f64) {
     let p_before = plate_offsets[index];
     let p_target = p_before + source_plate;
@@ -1949,10 +1958,17 @@ fn get_plate_shift(
     let (col_target, row_target) = plate_position(p_target, total_plate_count);
     let (col_source, row_source) = plate_position(source_plate, source_plate_count);
 
-    let dx = (col_target as f64 - col_source as f64) * plate_spacing.x;
-    let dy = (row_target as f64 - row_source as f64) * -plate_spacing.y;
+    let (target_x, target_y) = plate_origin(col_target, row_target, plate_layout);
+    let (source_x, source_y) = plate_origin(col_source, row_source, plate_layout);
 
-    (dx, dy)
+    (target_x - source_x, source_y - target_y)
+}
+
+fn plate_origin(col: usize, row: usize, plate_layout: PlateLayout) -> (f64, f64) {
+    (
+        col as f64 * plate_layout.bed_x + col as f64 * plate_layout.gap_x,
+        row as f64 * plate_layout.bed_y + row as f64 * plate_layout.gap_y,
+    )
 }
 
 fn plate_position(plate: usize, plate_count: usize) -> (usize, usize) {
@@ -1975,7 +1991,7 @@ fn rewrite_build_item_transforms(
     source_plate_count: usize,
     total_plate_count: usize,
     object_to_plate: &BTreeMap<u32, usize>,
-    plate_spacing: PlateSpacing,
+    plate_layout: PlateLayout,
 ) -> Result<String> {
     let item_re =
         regex::Regex::new(r#"(<item\b[^>]*\bobjectid=")(\d+)("[^>]*\btransform=")([^"]+)(")"#)?;
@@ -1989,7 +2005,7 @@ fn rewrite_build_item_transforms(
                     plate_offsets,
                     source_plate_count,
                     total_plate_count,
-                    plate_spacing,
+                    plate_layout,
                 );
                 if dx != 0.0 || dy != 0.0 {
                     let orig_transform = &captures[4];
@@ -2132,12 +2148,12 @@ mod tests {
     #[test]
     fn shifts_between_source_and_merged_bambu_plate_layouts() {
         let plate_offsets = vec![0, 7];
-        let plate_spacing = PlateSpacing { x: 300.0, y: 320.0 };
+        let plate_layout = DEFAULT_PLATE_LAYOUT;
 
         // Source plate 2 in a 6-plate input is col 1,row 0.
         // Merged plate 9 in a 13-plate output is col 0,row 2.
         assert_eq!(
-            get_plate_shift(1, 2, &plate_offsets, 6, 13, plate_spacing),
+            get_plate_shift(1, 2, &plate_offsets, 6, 13, plate_layout),
             (-300.0, -640.0)
         );
     }
@@ -2145,32 +2161,52 @@ mod tests {
     #[test]
     fn shifts_first_input_when_merged_layout_changes() {
         let plate_offsets = vec![0, 6];
-        let plate_spacing = PlateSpacing { x: 300.0, y: 320.0 };
+        let plate_layout = DEFAULT_PLATE_LAYOUT;
 
         // Source plate 4 in a 6-plate input is col 0,row 1.
         // Merged plate 4 in a 12-plate output is col 3,row 0.
         assert_eq!(
-            get_plate_shift(0, 4, &plate_offsets, 6, 12, plate_spacing),
+            get_plate_shift(0, 4, &plate_offsets, 6, 12, plate_layout),
             (900.0, 320.0)
         );
     }
 
     #[test]
-    fn derives_plate_spacing_from_printable_area() {
+    fn derives_plate_layout_from_printable_area() {
         let settings = serde_json::json!({
             "printable_area": ["0x0", "180x0", "180x180", "0x180"]
         });
 
         assert_eq!(
-            plate_spacing_from_project_settings(&settings),
-            Some(PlateSpacing { x: 224.0, y: 244.0 })
+            plate_layout_from_project_settings(&settings),
+            Some(PlateLayout {
+                bed_x: 180.0,
+                bed_y: 180.0,
+                gap_x: 44.0,
+                gap_y: 64.0
+            })
         );
     }
 
     #[test]
-    fn uses_default_plate_spacing_without_printable_area() {
+    fn plate_origin_uses_gap_between_plates_only() {
+        let plate_layout = PlateLayout {
+            bed_x: 180.0,
+            bed_y: 180.0,
+            gap_x: 44.0,
+            gap_y: 64.0,
+        };
+
+        assert_eq!(plate_origin(0, 0, plate_layout), (0.0, 0.0));
+        assert_eq!(plate_origin(1, 0, plate_layout), (224.0, 0.0));
+        assert_eq!(plate_origin(2, 0, plate_layout), (448.0, 0.0));
+        assert_eq!(plate_origin(0, 1, plate_layout), (0.0, 244.0));
+    }
+
+    #[test]
+    fn uses_default_plate_layout_without_printable_area() {
         assert_eq!(
-            plate_spacing_from_project_settings(&serde_json::json!({})),
+            plate_layout_from_project_settings(&serde_json::json!({})),
             None
         );
     }
