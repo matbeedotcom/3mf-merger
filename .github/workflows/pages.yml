@@ -1,4 +1,4 @@
-name: Deploy demo to GitHub Pages
+name: Deploy app to GitHub Pages
 
 on:
   push:
@@ -37,7 +37,7 @@ jobs:
       - name: Assemble Pages artifact
         run: |
           mkdir -p dist
-          cp demo.html dist/demo.html
+          cp merge.html dist/merge.html
           cp -R pkg dist/pkg
           cp pages-index.html dist/index.html
           touch dist/.nojekyll
