@@ -123,8 +123,8 @@ fn merges_luigi_and_yoshi_fixture_package() {
     // Luigi has 7 plates. Yoshi plate 2 target is 9.
     // Source layout is 3x3 for 6 Yoshi plates, target layout is 4x4 for 13 merged plates.
     // Source: col 1, row 0. Target: col 0, row 2.
-    // dx = -300.0, dy = -640.0.
-    // Shifted Y: min_y = 65.99101 - 640.0 = -574.00899.
+    // The selected machine has a 256x256 printable area, so dx = -256.0, dy = -512.0.
+    // Shifted Y: min_y = 65.99101 - 512.0 = -446.00899.
     let mut plate_9 = String::new();
     archive
         .by_name("Metadata/plate_9.json")
@@ -133,13 +133,13 @@ fn merges_luigi_and_yoshi_fixture_package() {
         .unwrap();
     let p9_json: serde_json::Value = serde_json::from_str(&plate_9).unwrap();
     let bbox_all = p9_json["bbox_all"].as_array().unwrap();
-    assert!((bbox_all[1].as_f64().unwrap() - -574.00899).abs() < 1e-4);
+    assert!((bbox_all[1].as_f64().unwrap() - -446.00899).abs() < 1e-4);
 
     // Verify Yoshi build item transforms are shifted by the same Y offset
     // Yoshi objectid=2 (mapped to 91) transform Y-translation
     // Yoshi original objectid=2 translation: (383.703525, 77.269337, 6.2499995)
-    // Shifted X = 383.703525 - 300.0 = 83.703525
-    // Shifted Y = 77.269337 - 640.0 = -562.730663
+    // Shifted X = 383.703525 - 256.0 = 127.703525
+    // Shifted Y = 77.269337 - 512.0 = -434.730663
     let item_node = model.find("objectid=\"91\"").unwrap();
     let tf_start = model[item_node..].find("transform=\"").unwrap() + item_node + 11;
     let tf_end = model[tf_start..].find("\"").unwrap() + tf_start;
@@ -147,8 +147,8 @@ fn merges_luigi_and_yoshi_fixture_package() {
     let tf_parts: Vec<&str> = tf_str.split_whitespace().collect();
     let tx: f64 = tf_parts[9].parse().unwrap();
     let ty: f64 = tf_parts[10].parse().unwrap();
-    assert!((tx - 83.703525).abs() < 1e-4);
-    assert!((ty - -562.730663).abs() < 1e-4);
+    assert!((tx - 127.703525).abs() < 1e-4);
+    assert!((ty - -434.730663).abs() < 1e-4);
 }
 
 fn plate_entries_matching(entries: &BTreeSet<String>, suffix: &str) -> usize {
