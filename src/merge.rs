@@ -21,6 +21,8 @@ const MODEL: &str = "3D/3dmodel.model";
 const MODEL_RELS: &str = "3D/_rels/3dmodel.model.rels";
 const MODEL_SETTINGS: &str = "Metadata/model_settings.config";
 const DEFAULT_PLATE_SPACING: PlateSpacing = PlateSpacing { x: 300.0, y: 320.0 };
+const PLATE_GUTTER_X: f64 = 44.0;
+const PLATE_GUTTER_Y: f64 = 64.0;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct PlateSpacing {
@@ -1920,8 +1922,8 @@ fn plate_spacing_from_project_settings(settings: &serde_json::Value) -> Option<P
     let height = max_y - min_y;
     if width.is_finite() && height.is_finite() && width > 0.0 && height > 0.0 {
         Some(PlateSpacing {
-            x: width,
-            y: height,
+            x: width + PLATE_GUTTER_X,
+            y: height + PLATE_GUTTER_Y,
         })
     } else {
         None
@@ -2130,26 +2132,26 @@ mod tests {
     #[test]
     fn shifts_between_source_and_merged_bambu_plate_layouts() {
         let plate_offsets = vec![0, 7];
-        let plate_spacing = PlateSpacing { x: 256.0, y: 256.0 };
+        let plate_spacing = PlateSpacing { x: 300.0, y: 320.0 };
 
         // Source plate 2 in a 6-plate input is col 1,row 0.
         // Merged plate 9 in a 13-plate output is col 0,row 2.
         assert_eq!(
             get_plate_shift(1, 2, &plate_offsets, 6, 13, plate_spacing),
-            (-256.0, -512.0)
+            (-300.0, -640.0)
         );
     }
 
     #[test]
     fn shifts_first_input_when_merged_layout_changes() {
         let plate_offsets = vec![0, 6];
-        let plate_spacing = PlateSpacing { x: 256.0, y: 256.0 };
+        let plate_spacing = PlateSpacing { x: 300.0, y: 320.0 };
 
         // Source plate 4 in a 6-plate input is col 0,row 1.
         // Merged plate 4 in a 12-plate output is col 3,row 0.
         assert_eq!(
             get_plate_shift(0, 4, &plate_offsets, 6, 12, plate_spacing),
-            (768.0, 256.0)
+            (900.0, 320.0)
         );
     }
 
@@ -2161,7 +2163,7 @@ mod tests {
 
         assert_eq!(
             plate_spacing_from_project_settings(&settings),
-            Some(PlateSpacing { x: 180.0, y: 180.0 })
+            Some(PlateSpacing { x: 224.0, y: 244.0 })
         );
     }
 
