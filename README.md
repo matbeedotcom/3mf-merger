@@ -11,8 +11,7 @@ Actions deployments, pushes to `main` publish:
 
 <https://matbeedotcom.github.io/3mf-merger/>
 
-The root page redirects to `merge.html`, which loads the browser WASM package
-from `pkg/`.
+The root page loads the browser WASM package from `pkg/`.
 
 ## Install
 

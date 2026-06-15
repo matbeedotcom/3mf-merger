@@ -37,9 +37,8 @@ jobs:
       - name: Assemble Pages artifact
         run: |
           mkdir -p dist
-          cp merge.html dist/merge.html
+          cp index.html dist/index.html
           cp -R pkg dist/pkg
-          cp pages-index.html dist/index.html
           touch dist/.nojekyll
 
       - name: Upload Pages artifact
